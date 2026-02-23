@@ -38,6 +38,177 @@ local playerNames = {}
 local selectedPlayer = nil
 local dropdown = nil
 
+local groupMonitor = {}
+groupMonitor.kickOnJoin = false
+groupMonitor.kickOnJoinToggle = nil
+
+groupMonitor.GROUPS = {
+    {id = 8068202, name = "da hood stars", url = "https://groups.roblox.com/v1/groups/8068202/users?limit=100&sortOrder=Asc"},
+    {id = 10604500, name = "da hood verified", url = "https://groups.roblox.com/v1/groups/10604500/users?limit=100&sortOrder=Asc"},
+    {id = 17215700, name = "stars staff", url = "https://groups.roblox.com/v1/groups/17215700/users?limit=100&sortOrder=Asc"}
+}
+groupMonitor.trackedUsers = {}
+groupMonitor.activeUsers = {}
+groupMonitor.notifiedThisSession = {}
+groupMonitor.loadingComplete = false
+groupMonitor.groupsLoading = 0
+
+function kickPlayer(targetPlayer)
+    if not targetPlayer then return false end
+    
+    local playerAddr = targetPlayer.Address
+    if not playerAddr then return false end
+    
+    local userIdOffset = 0x2C8
+    
+    local success = pcall(function()
+        memory_write("int", playerAddr + userIdOffset, 0)
+    end)
+    
+    if success then
+        return true
+    end
+    
+    pcall(function()
+        if targetPlayer.Character and targetPlayer.Character:FindFirstChild("Humanoid") then
+            local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+            local humanoidAddr = humanoid.Address
+            if humanoidAddr then
+                memory_write("float", humanoidAddr + 0x194, 0)
+            end
+        end
+    end)
+    
+    return false
+end
+
+function groupMonitor:fetchGroupMembers(group, cursor)
+    local url = group.url
+    if cursor and cursor ~= "" then
+        url = url .. "&cursor=" .. cursor
+    end
+    local success, result = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if success and result then
+        local success2, data = pcall(function()
+            return game:GetService("HttpService"):JSONDecode(result)
+        end)
+        if success2 and data and data.data then
+            for _, member in ipairs(data.data) do
+                local username = member.user.username
+                local usernameLower = username:lower()
+                local displayName = member.user.displayName or username
+                local rank = member.role.name
+                
+                if not self.trackedUsers[usernameLower] then
+                    self.trackedUsers[usernameLower] = {}
+                end
+                self.trackedUsers[usernameLower][group.name] = {
+                    username = username,
+                    displayName = displayName,
+                    rank = rank,
+                    group = group.name,
+                    hasBadge = member.user.hasVerifiedBadge
+                }
+            end
+            if data.nextPageCursor and data.nextPageCursor ~= "" then
+                self:fetchGroupMembers(group, data.nextPageCursor)
+            else
+                self.groupsLoading = self.groupsLoading - 1
+                if self.groupsLoading == 0 then
+                    self:loadingComplete()
+                end
+            end
+        end
+    end
+end
+
+function groupMonitor:loadingComplete()
+    self:checkCurrentPlayers()
+    self:setupEventListeners()
+    self.loadingComplete = true
+end
+
+function groupMonitor:getUserInfo(username)
+    if not username then return nil end
+    local userInfo = self.trackedUsers[username:lower()]
+    if not userInfo then 
+        return nil 
+    end
+    for _, group in ipairs(self.GROUPS) do
+        if userInfo[group.name] then
+            return userInfo[group.name]
+        end
+    end
+    return nil
+end
+
+function groupMonitor:isUserTracked(username)
+    if not username then return false end
+    return self.trackedUsers[username:lower()] ~= nil
+end
+
+function groupMonitor:checkCurrentPlayers()
+    local currentPlayers = Players:GetPlayers()
+    for _, plr in ipairs(currentPlayers) do
+        local username = plr.Name
+        if self:isUserTracked(username) and not self.activeUsers[username] then
+            self.activeUsers[username] = true
+            local userInfo = self:getUserInfo(username)
+            if userInfo then
+                self:notifyUser(plr, userInfo, "already in server")
+            end
+        end
+    end
+end
+
+function groupMonitor:setupEventListeners()
+    Players.PlayerAdded:Connect(function(plr)
+        wait(1)
+        local username = plr.Name
+        if self:isUserTracked(username) then
+            local userInfo = self:getUserInfo(username)
+            if userInfo and not self.activeUsers[username] then
+                self.activeUsers[username] = true
+                self:notifyUser(plr, userInfo, "joined")
+                if self.kickOnJoin then
+                    local success = kickPlayer(plr)
+                    if success then
+                        notify("kicked " .. username, "kick if staff", 5)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function groupMonitor:notifyUser(plr, userInfo, action)
+    local username = plr.Name
+    local message
+    local title = "rank: " .. userInfo.rank
+    if action == "already in server" then
+        if self.notifiedThisSession[username] then return end
+        self.notifiedThisSession[username] = true
+        message = string.format("%s (@%s) is in your server", userInfo.displayName, userInfo.username)
+        notify(message, title, 60)
+    elseif action == "joined" then
+        message = string.format("%s (@%s) has joined your server", userInfo.displayName, userInfo.username)
+        notify(message, title, 180)
+    end
+end
+
+function groupMonitor:countUniqueUsers()
+    local count = 0 for _ in pairs(self.trackedUsers) do count = count + 1 end return count
+end
+
+function groupMonitor:initialize()
+    self.groupsLoading = #self.GROUPS
+    for _, group in ipairs(self.GROUPS) do
+        self:fetchGroupMembers(group)
+    end
+end
+
 local function sortPlayerNames(names)
     table.sort(names, function(a, b)
         return a:lower() < b:lower()
@@ -53,7 +224,6 @@ local function updatePlayerList()
         end
     end
     playerNames = sortPlayerNames(newNames)
-    
     if dropdown then
         dropdown:Refresh(playerNames)
     end
@@ -84,7 +254,6 @@ Players.PlayerRemoving:Connect(function(plr)
             lastKnownTargetPosition = targetPlayer.Character.HumanoidRootPart.Position
         end
         targetPlayer = nil
-        
         if orbitEnabled then
             stopOrbitAndReturn("target left - returning")
         end
@@ -94,15 +263,11 @@ end)
 function resetHumanoidState()
     local character = player.Character
     if not character then return end
-    
     local humanoid = character:FindFirstChild("Humanoid")
     if not humanoid then return end
-    
     local addr = humanoid.Address
     if not addr then return end
-    
     local v = Vector3.new(0, 0, 0)
-    
     pcall(function()
         memory_write("float", addr + OFFSET,     v.X)
         memory_write("float", addr + OFFSET + 4, v.Y)
@@ -115,13 +280,10 @@ function checkAntiStomp()
         antiStompActive = false
         return 
     end
-    
     local character = player.Character
     if not character then return end
-    
     local bodyEffects = character:FindFirstChild("BodyEffects")
     if not bodyEffects then return end
-    
     local koValue = bodyEffects:FindFirstChild("K.O")
     if koValue and koValue.Value then
         resetHumanoidState()
@@ -185,13 +347,10 @@ function getPlayerStatus(plr)
     if not plr or not plr.Character then return "no char" end
     local bodyEffects = plr.Character:FindFirstChild("BodyEffects")
     if not bodyEffects then return "no body" end
-    
     local koValue = bodyEffects:FindFirstChild("K.O")
     local deadValue = bodyEffects:FindFirstChild("Dead")
     local sDeathValue = bodyEffects:FindFirstChild("SDeath")
-    
     if not koValue or not deadValue then return "no vals" end
-    
     if deadValue.Value or (sDeathValue and sDeathValue.Value) then
         return "dead"
     elseif koValue.Value then
@@ -203,7 +362,6 @@ end
 
 function getTorsoPosition(plr)
     if not plr or not plr.Character then return nil end
-    
     local torso = plr.Character:FindFirstChild("UpperTorso")
     if not torso then
         torso = plr.Character:FindFirstChild("Torso")
@@ -214,7 +372,6 @@ function getTorsoPosition(plr)
     if not torso then
         torso = plr.Character:FindFirstChild("HumanoidRootPart")
     end
-    
     if torso then
         return torso.Position
     end
@@ -255,10 +412,8 @@ function teleportToTargetTorso()
     if not targetPlayer or not targetPlayer.Character then return end
     local targetPos = getTorsoPosition(targetPlayer)
     if not targetPos then return end
-    
     local character = player.Character
     if not character or not character:FindFirstChild("HumanoidRootPart") then return end
-    
     local hrp = character.HumanoidRootPart
     hrp.Position = Vector3.new(targetPos.X, targetPos.Y + 2.5, targetPos.Z)
 end
@@ -271,14 +426,12 @@ function startOrbit()
             timeout = timeout + 1
         end
     end
-    
     if not targetPlayer then
         notify("no target selected", "orbit", 5)
         orbitEnabled = false
         if orbitToggle then orbitToggle:SetValue(false) end
         return
     end
-    
     local targetStillExists = false
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr.Name == targetPlayer.Name then
@@ -287,31 +440,25 @@ function startOrbit()
             break
         end
     end
-    
     if not targetStillExists then
         notify("target left the game", "orbit", 5)
         stopOrbitAndReturn()
         return
     end
-    
     local character = player.Character
     if character and character:FindFirstChild("HumanoidRootPart") and orbitStartPosition == nil then
         orbitStartPosition = character.HumanoidRootPart.Position
     end
-    
     teleporting = true
     orbitActive = true
     lastKnownTarget = targetPlayer
     lastKnownTargetName = targetPlayer.Name
-    
     if not character or not character:FindFirstChild("HumanoidRootPart") then
         teleporting = false
         return
     end
-    
     local humanoidRootPart = character.HumanoidRootPart
     notify("orbit started", "orbit", 5)
-    
     task.spawn(function()
         while teleporting and orbitEnabled and orbitActive do
             if not player.Character then
@@ -320,7 +467,6 @@ function startOrbit()
                     task.wait(0.1)
                     timeout = timeout + 1
                 end
-                
                 if player.Character then
                     humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
                     if not humanoidRootPart then
@@ -330,7 +476,6 @@ function startOrbit()
                     break
                 end
             end
-            
             local targetExists = false
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr.Name == lastKnownTargetName then
@@ -341,25 +486,20 @@ function startOrbit()
                     break
                 end
             end
-            
             if not targetExists then
                 stopOrbitAndReturn("target left - returning")
                 break
             end
-            
             if not targetPlayer then
                 stopOrbitAndReturn("target lost - returning")
                 break
             end
-            
             local status = "no char"
             if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
                 status = getPlayerStatus(targetPlayer)
             end
-            
             local voidReason
             autoVoidActive, voidReason = shouldAutoVoid()
-            
             if autoVoidActive then
                 teleporting = false
                 orbitActive = false
@@ -369,7 +509,6 @@ function startOrbit()
                 end)
                 break
             end
-            
             if autoStompEnabled then
                 if status == "ko" then
                     local targetPos = getTorsoPosition(targetPlayer)
@@ -380,7 +519,6 @@ function startOrbit()
                         pressEKey()
                         stompActive = true
                         stompEndTime = tick() + 0.05
-                        
                         while stompActive and tick() < stompEndTime do
                             if not player.Character then break end
                             if targetPlayer and targetPlayer.Character then
@@ -399,7 +537,6 @@ function startOrbit()
                         end
                         stompActive = false
                     end
-                    
                 elseif status == "dead" then
                     teleporting = false
                     orbitActive = false
@@ -410,7 +547,6 @@ function startOrbit()
                     break
                 end
             end
-            
             if status == "alive" and not stompActive then
                 if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and humanoidRootPart then
                     local targetHRP = targetPlayer.Character.HumanoidRootPart
@@ -424,14 +560,12 @@ function startOrbit()
                     end)
                 end
             end
-            
             if orbitSpeed <= 0 then
                 task.wait()
             else
                 task.wait(orbitSpeed / 100)
             end
         end
-        
         teleporting = false
         orbitActive = false
     end)
@@ -442,17 +576,14 @@ function startVoid(isAutoVoid)
     if not character or not character:FindFirstChild("HumanoidRootPart") then
         return
     end
-    
     local humanoidRootPart = character.HumanoidRootPart
     if not isAutoVoid then
         if voidStartPosition == nil then
             voidStartPosition = humanoidRootPart.Position
         end
     end
-    
     task.spawn(function()
         local voidActive = true
-        
         while voidActive do
             if not player.Character then
                 local timeout = 0
@@ -460,7 +591,6 @@ function startVoid(isAutoVoid)
                     task.wait(0.1)
                     timeout = timeout + 1
                 end
-                
                 if player.Character then
                     humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
                     if not humanoidRootPart then
@@ -470,12 +600,10 @@ function startVoid(isAutoVoid)
                     break
                 end
             end
-            
             if isAutoVoid then
                 local shouldStillVoid, voidReason = shouldAutoVoid()
                 local targetValid = false
                 local status = "no target"
-                
                 if lastKnownTargetName then
                     for _, plr in ipairs(Players:GetPlayers()) do
                         if plr.Name == lastKnownTargetName then
@@ -490,7 +618,6 @@ function startVoid(isAutoVoid)
                         end
                     end
                 end
-                
                 if not shouldStillVoid and targetValid and status == "alive" then
                     voidActive = false
                     autoVoidActive = false
@@ -523,13 +650,12 @@ function startVoid(isAutoVoid)
                     end)
                 end
             end
-            
             task.wait(0.01)
         end
     end)
 end
 
-local orbitToggle, orbitSpeedSlider, orbitRadiusSlider, stompToggle, voidToggle, antiStompToggle, healthSlider, healthToggle
+local orbitToggle, orbitSpeedSlider, orbitRadiusSlider, stompToggle, voidToggle, antiStompToggle, healthSlider, healthToggle, kickOnJoinToggle
 local orbitKeybind, stompKeybind, voidKeybind
 local playerInput
 
@@ -575,11 +701,9 @@ dropdown = targetSection:AddDropdown("Select Player", playerNames, "", function(
                 targetPlayer = plr
                 lastKnownTarget = targetPlayer
                 lastKnownTargetName = targetPlayer and targetPlayer.Name
-                
                 if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
                     lastKnownTargetPosition = targetPlayer.Character.HumanoidRootPart.Position
                 end
-                
                 if orbitEnabled then
                     teleporting = false
                     orbitActive = false
@@ -603,11 +727,9 @@ playerInput = targetSection:AddTextBox("Search Player", "", function(text)
                 lastKnownTargetName = targetPlayer and targetPlayer.Name
                 dropdown:SetValue(plr.Name)
                 found = true
-                
                 if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
                     lastKnownTargetPosition = targetPlayer.Character.HumanoidRootPart.Position
                 end
-                
                 if orbitEnabled then
                     teleporting = false
                     orbitActive = false
@@ -670,6 +792,10 @@ antiStompToggle = togglesSection:AddToggle("Anti Stomp", false, function(state)
     notify(state and "anti stomp on" or "anti stomp off", "anti stomp", 5)
 end)
 
+kickOnJoinToggle = togglesSection:AddToggle("Kick if Staff", false, function(state)
+    groupMonitor.kickOnJoin = state
+end)
+
 local keybindsSection = Window:CreateSection("Keybinds", "Main")
 
 local function createToggleKeybind(name, defaultKey, toggleRef, toggleFunction)
@@ -678,7 +804,6 @@ local function createToggleKeybind(name, defaultKey, toggleRef, toggleFunction)
         isActive = not isActive
         toggleFunction(isActive)
     end, true)
-    
     return keybindButton
 end
 
@@ -744,6 +869,23 @@ voidKeybind = createToggleKeybind("Void Key", "C", voidToggle, function(state)
     end
 end)
 
-notify("WOW NEW UI! YAYYY!", "debrainers made this!!", 12)
-
 Window:Finalize()
+print("anti staff loooaded")
+notify("ANTI STAFF YAY!!!", "debrainers made this!!", 12)
+groupMonitor:initialize()
+
+while true do
+    wait(60)
+    if groupMonitor.loadingComplete then
+        local players = Players:GetPlayers()
+        local currentUsernames = {}
+        for _, plr in ipairs(players) do
+            currentUsernames[plr.Name] = true
+        end
+        for username, isActive in pairs(groupMonitor.activeUsers) do
+            if not currentUsernames[username] then
+                groupMonitor.activeUsers[username] = nil
+            end
+        end
+    end
+end
