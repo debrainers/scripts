@@ -1,4 +1,5 @@
-loadstring(game:HttpGet("https://arcanecheats.xyz/api/matcha/uilib"))()
+-- UI ISNT MINE!!! full credits for arcane ui go to "192.0.0.2" on discord!
+loadstring(game:HttpGet("https://github.com/debrainers/scripts/blob/main/ArcaneUiNOTMINE"))()
 repeat wait() until Arcane
 
 local Window = Arcane:CreateWindow("@debrainers", Vector2.new(650, 350), "Default")
