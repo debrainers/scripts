@@ -32,8 +32,13 @@ local orbitSpeed = 0
 local healthThreshold = 30
 local healthSaveEnabled = true
 local healthVoidActive = false
+local knockedVoidActive = false
+local knockedVoidDone = false
+local deadVoidActive = false
 
 local OFFSET = 0x18C
+local OFF_PRIMITIVE = 0x148
+local OFF_CFRAME = 0xC0
 
 local playerNames = {}
 local selectedPlayer = nil
@@ -54,22 +59,62 @@ groupMonitor.notifiedThisSession = {}
 groupMonitor.loadingComplete = false
 groupMonitor.groupsLoading = 0
 
+local function getPrimitive(part)
+    local addr = part.Address
+    if not addr or addr == 0 then return nil end
+    local prim = memory_read("uintptr_t", addr + OFF_PRIMITIVE)
+    if not prim or prim == 0 then return nil end
+    return prim
+end
+
+local function writeUprightRot(primAddr)
+    local base = primAddr + OFF_CFRAME
+    memory_write("float", base + 0x00, 1)
+    memory_write("float", base + 0x04, 0)
+    memory_write("float", base + 0x08, 0)
+    memory_write("float", base + 0x0C, 0)
+    memory_write("float", base + 0x10, 1)
+    memory_write("float", base + 0x14, 0)
+    memory_write("float", base + 0x18, 0)
+    memory_write("float", base + 0x1C, 0)
+    memory_write("float", base + 0x20, 1)
+end
+
+function teleportToTargetTorso()
+    if not targetPlayer or not targetPlayer.Character then return end
+    local targetPos = getTorsoPosition(targetPlayer)
+    if not targetPos then return end
+    local character = player.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
+    local hrp = character.HumanoidRootPart
+    hrp.Position = Vector3.new(targetPos.X, targetPos.Y + 2.5, targetPos.Z)
+end
+
+local function performStomp(targetPosition)
+    if not targetPosition or not player.Character then return end
+    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local hrpPrim = getPrimitive(hrp)
+    hrp.Position = Vector3.new(targetPosition.X, targetPosition.Y + 2.5, targetPosition.Z)
+    if hrpPrim then
+        writeUprightRot(hrpPrim)
+    end
+    keypress(0x45)
+    task.wait(0.01)
+    keyrelease(0x45)
+end
+
 function kickPlayer(targetPlayer)
     if not targetPlayer then return false end
-    
     local playerAddr = targetPlayer.Address
     if not playerAddr then return false end
-    
     local userIdOffset = 0x2C8
-    
     local success = pcall(function()
         memory_write("int", playerAddr + userIdOffset, 0)
     end)
-    
     if success then
         return true
     end
-    
     pcall(function()
         if targetPlayer.Character and targetPlayer.Character:FindFirstChild("Humanoid") then
             local humanoid = targetPlayer.Character:FindFirstChild("Humanoid")
@@ -79,7 +124,6 @@ function kickPlayer(targetPlayer)
             end
         end
     end)
-    
     return false
 end
 
@@ -101,7 +145,6 @@ function groupMonitor:fetchGroupMembers(group, cursor)
                 local usernameLower = username:lower()
                 local displayName = member.user.displayName or username
                 local rank = member.role.name
-                
                 if not self.trackedUsers[usernameLower] then
                     self.trackedUsers[usernameLower] = {}
                 end
@@ -159,6 +202,12 @@ function groupMonitor:checkCurrentPlayers()
             local userInfo = self:getUserInfo(username)
             if userInfo then
                 self:notifyUser(plr, userInfo, "already in server")
+                if self.kickOnJoin then
+                    local success = kickPlayer(plr)
+                    if success then
+                        notify("kicked " .. username, "kick if staff", 5)
+                    end
+                end
             end
         end
     end
@@ -306,7 +355,7 @@ end)
 
 function pressEKey()
     keypress(0x45)
-    task.wait(0.05)
+    task.wait(0.01)
     keyrelease(0x45)
 end
 
@@ -409,169 +458,6 @@ function getRandomOrbitPoint(center, radius)
     return Vector3.new(center.X + x, center.Y + y, center.Z + z)
 end
 
-function teleportToTargetTorso()
-    if not targetPlayer or not targetPlayer.Character then return end
-    local targetPos = getTorsoPosition(targetPlayer)
-    if not targetPos then return end
-    local character = player.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") then return end
-    local hrp = character.HumanoidRootPart
-    hrp.Position = Vector3.new(targetPos.X, targetPos.Y + 2.5, targetPos.Z)
-end
-
-function startOrbit()
-    if not player.Character then
-        local timeout = 0
-        while not player.Character and timeout < 100 do
-            task.wait(0.1)
-            timeout = timeout + 1
-        end
-    end
-    if not targetPlayer then
-        notify("no target selected", "orbit", 5)
-        orbitEnabled = false
-        if orbitToggle then orbitToggle:SetValue(false) end
-        return
-    end
-    local targetStillExists = false
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr.Name == targetPlayer.Name then
-            targetStillExists = true
-            targetPlayer = plr
-            break
-        end
-    end
-    if not targetStillExists then
-        notify("target left the game", "orbit", 5)
-        stopOrbitAndReturn()
-        return
-    end
-    local character = player.Character
-    if character and character:FindFirstChild("HumanoidRootPart") and orbitStartPosition == nil then
-        orbitStartPosition = character.HumanoidRootPart.Position
-    end
-    teleporting = true
-    orbitActive = true
-    lastKnownTarget = targetPlayer
-    lastKnownTargetName = targetPlayer.Name
-    if not character or not character:FindFirstChild("HumanoidRootPart") then
-        teleporting = false
-        return
-    end
-    local humanoidRootPart = character.HumanoidRootPart
-    notify("orbit started", "orbit", 5)
-    task.spawn(function()
-        while teleporting and orbitEnabled and orbitActive do
-            if not player.Character then
-                local timeout = 0
-                while not player.Character and timeout < 200 do
-                    task.wait(0.1)
-                    timeout = timeout + 1
-                end
-                if player.Character then
-                    humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
-                    if not humanoidRootPart then
-                        break
-                    end
-                else
-                    break
-                end
-            end
-            local targetExists = false
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if plr.Name == lastKnownTargetName then
-                    targetExists = true
-                    if targetPlayer ~= plr then
-                        targetPlayer = plr
-                    end
-                    break
-                end
-            end
-            if not targetExists then
-                stopOrbitAndReturn("target left - returning")
-                break
-            end
-            if not targetPlayer then
-                stopOrbitAndReturn("target lost - returning")
-                break
-            end
-            local status = "no char"
-            if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
-                status = getPlayerStatus(targetPlayer)
-            end
-            local voidReason
-            autoVoidActive, voidReason = shouldAutoVoid()
-            if autoVoidActive then
-                teleporting = false
-                orbitActive = false
-                notify(voidReason, "void", 5)
-                task.spawn(function()
-                    startVoid(true)
-                end)
-                break
-            end
-            if autoStompEnabled then
-                if status == "ko" then
-                    local targetPos = getTorsoPosition(targetPlayer)
-                    if targetPos and humanoidRootPart then
-                        pcall(function()
-                            humanoidRootPart.Position = Vector3.new(targetPos.X, targetPos.Y + 2.5, targetPos.Z)
-                        end)
-                        pressEKey()
-                        stompActive = true
-                        stompEndTime = tick() + 0.05
-                        while stompActive and tick() < stompEndTime do
-                            if not player.Character then break end
-                            if targetPlayer and targetPlayer.Character then
-                                if getPlayerStatus(targetPlayer) == "dead" then
-                                    stompActive = false
-                                    teleporting = false
-                                    orbitActive = false
-                                    notify("dead - void activated", "void", 5)
-                                    task.spawn(function()
-                                        startVoid(true)
-                                    end)
-                                    break
-                                end
-                            end
-                            task.wait(0.01)
-                        end
-                        stompActive = false
-                    end
-                elseif status == "dead" then
-                    teleporting = false
-                    orbitActive = false
-                    notify("target dead - void activated", "void", 5)
-                    task.spawn(function()
-                        startVoid(true)
-                    end)
-                    break
-                end
-            end
-            if status == "alive" and not stompActive then
-                if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and humanoidRootPart then
-                    local targetHRP = targetPlayer.Character.HumanoidRootPart
-                    local targetPos = targetHRP.Position
-                    lastKnownTargetPosition = targetPos
-                    lastKnownTarget = targetPlayer
-                    lastKnownTargetName = targetPlayer.Name
-                    local newPos = getRandomOrbitPoint(targetPos, orbitRadius)
-                    pcall(function()
-                        humanoidRootPart.Position = newPos
-                    end)
-                end
-            end
-            if orbitSpeed <= 0 then
-                task.wait()
-            else
-                task.wait(orbitSpeed / 100)
-            end
-        end
-        teleporting = false
-        orbitActive = false
-    end)
-end
-
 function startVoid(isAutoVoid)
     local character = player.Character
     if not character or not character:FindFirstChild("HumanoidRootPart") then
@@ -653,6 +539,180 @@ function startVoid(isAutoVoid)
             end
             task.wait(0.01)
         end
+    end)
+end
+
+function startOrbit()
+    if not player.Character then
+        local timeout = 0
+        while not player.Character and timeout < 100 do
+            task.wait(0.1)
+            timeout = timeout + 1
+        end
+    end
+    if not targetPlayer then
+        notify("no target selected", "orbit", 5)
+        orbitEnabled = false
+        if orbitToggle then orbitToggle:SetValue(false) end
+        return
+    end
+    local targetStillExists = false
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Name == targetPlayer.Name then
+            targetStillExists = true
+            targetPlayer = plr
+            break
+        end
+    end
+    if not targetStillExists then
+        notify("target left the game", "orbit", 5)
+        stopOrbitAndReturn()
+        return
+    end
+    local character = player.Character
+    if character and character:FindFirstChild("HumanoidRootPart") and orbitStartPosition == nil then
+        orbitStartPosition = character.HumanoidRootPart.Position
+    end
+    teleporting = true
+    orbitActive = true
+    knockedVoidDone = false
+    deadVoidActive = false
+    lastKnownTarget = targetPlayer
+    lastKnownTargetName = targetPlayer.Name
+    if not character or not character:FindFirstChild("HumanoidRootPart") then
+        teleporting = false
+        return
+    end
+    local humanoidRootPart = character.HumanoidRootPart
+    notify("orbit started", "orbit", 5)
+    task.spawn(function()
+        while teleporting and orbitEnabled and orbitActive do
+            if not player.Character then
+                local timeout = 0
+                while not player.Character and timeout < 200 do
+                    task.wait(0.1)
+                    timeout = timeout + 1
+                end
+                if player.Character then
+                    humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
+                    if not humanoidRootPart then
+                        break
+                    end
+                else
+                    break
+                end
+            end
+            local targetExists = false
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr.Name == lastKnownTargetName then
+                    targetExists = true
+                    if targetPlayer ~= plr then
+                        targetPlayer = plr
+                    end
+                    break
+                end
+            end
+            if not targetExists then
+                stopOrbitAndReturn("target left - returning")
+                break
+            end
+            if not targetPlayer then
+                stopOrbitAndReturn("target lost - returning")
+                break
+            end
+            local status = "no char"
+            if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                status = getPlayerStatus(targetPlayer)
+            end
+            local voidReason
+            autoVoidActive, voidReason = shouldAutoVoid()
+            if autoVoidActive then
+                teleporting = false
+                orbitActive = false
+                notify(voidReason, "void", 5)
+                task.spawn(function()
+                    startVoid(true)
+                end)
+                break
+            end
+            if autoStompEnabled then
+                if status == "ko" then
+                    if not knockedVoidDone then
+                        knockedVoidActive = true
+                        local startTime = tick()
+                        while tick() - startTime < 0.5 and knockedVoidActive do
+                            pcall(function()
+                                humanoidRootPart.Position = Vector3.new(
+                                    math.random(-999999, 999999),
+                                    math.random(0, 999999),
+                                    math.random(-999999, 999999)
+                                )
+                            end)
+                            task.wait(0.01)
+                        end
+                        knockedVoidActive = false
+                        knockedVoidDone = true
+                    end
+                    if knockedVoidDone and not deadVoidActive then
+                        local targetPos = getTorsoPosition(targetPlayer)
+                        if targetPos and humanoidRootPart then
+                            performStomp(targetPos)
+                            stompActive = true
+                            stompEndTime = tick() + 0.05
+                            while stompActive and tick() < stompEndTime do
+                                if not player.Character then break end
+                                if targetPlayer and targetPlayer.Character then
+                                    if getPlayerStatus(targetPlayer) == "dead" then
+                                        stompActive = false
+                                        deadVoidActive = true
+                                        teleporting = false
+                                        orbitActive = false
+                                        notify("dead - void activated", "void", 5)
+                                        task.spawn(function()
+                                            startVoid(true)
+                                        end)
+                                        break
+                                    end
+                                end
+                                task.wait(0.01)
+                            end
+                            stompActive = false
+                        end
+                    end
+                elseif status == "dead" and not deadVoidActive then
+                    deadVoidActive = true
+                    teleporting = false
+                    orbitActive = false
+                    notify("target dead - void activated", "void", 5)
+                    task.spawn(function()
+                        startVoid(true)
+                    end)
+                    break
+                else
+                    knockedVoidDone = false
+                end
+            end
+            if status == "alive" and not stompActive then
+                if targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") and humanoidRootPart then
+                    local targetHRP = targetPlayer.Character.HumanoidRootPart
+                    local targetPos = targetHRP.Position
+                    lastKnownTargetPosition = targetPos
+                    lastKnownTarget = targetPlayer
+                    lastKnownTargetName = targetPlayer.Name
+                    local newPos = getRandomOrbitPoint(targetPos, orbitRadius)
+                    pcall(function()
+                        humanoidRootPart.Position = newPos
+                    end)
+                end
+            end
+            if orbitSpeed <= 0 then
+                task.wait()
+            else
+                task.wait(orbitSpeed / 100)
+            end
+        end
+        teleporting = false
+        orbitActive = false
     end)
 end
 
@@ -753,6 +813,8 @@ orbitToggle = togglesSection:AddToggle("Orbit", false, function(state)
     orbitEnabled = state
     if state then
         autoVoidActive = false
+        knockedVoidDone = false
+        deadVoidActive = false
         startOrbit()
     else
         teleporting = false
@@ -815,6 +877,8 @@ orbitKeybind = createToggleKeybind("Orbit Key", "X", orbitToggle, function(state
                 orbitEnabled = true
                 orbitToggle:SetValue(true)
                 autoVoidActive = false
+                knockedVoidDone = false
+                deadVoidActive = false
                 startOrbit()
             else
                 orbitEnabled = false
