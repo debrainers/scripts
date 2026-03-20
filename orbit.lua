@@ -41,33 +41,18 @@ local OFF_PRIMITIVE = 0x148
 local OFF_CFRAME = 0xC0
 
 local playerNames = {}
-local selectedPlayer = nil
 local dropdown = nil
-
-local groupMonitor = {}
-groupMonitor.kickOnJoin = false
-groupMonitor.kickOnJoinToggle = nil
-
-groupMonitor.GROUPS = {
-    {id = 8068202, name = "da hood stars", url = "https://groups.roblox.com/v1/groups/8068202/users?limit=100&sortOrder=Asc"},
-    {id = 10604500, name = "da hood verified", url = "https://groups.roblox.com/v1/groups/10604500/users?limit=100&sortOrder=Asc"},
-    {id = 17215700, name = "stars staff", url = "https://groups.roblox.com/v1/groups/17215700/users?limit=100&sortOrder=Asc"}
-}
-groupMonitor.trackedUsers = {}
-groupMonitor.activeUsers = {}
-groupMonitor.notifiedThisSession = {}
-groupMonitor.loadingComplete = false
-groupMonitor.groupsLoading = 0
 
 local function getPrimitive(part)
     local addr = part.Address
     if not addr or addr == 0 then return nil end
-    local prim = memory_read("uintptr_t", addr + OFF_PRIMITIVE)
+    local prim = memory_read("uintptr", addr + OFF_PRIMITIVE)
     if not prim or prim == 0 then return nil end
     return prim
 end
 
 local function writeUprightRot(primAddr)
+    if not primAddr then return end
     local base = primAddr + OFF_CFRAME
     memory_write("float", base + 0x00, 1)
     memory_write("float", base + 0x04, 0)
@@ -78,6 +63,35 @@ local function writeUprightRot(primAddr)
     memory_write("float", base + 0x18, 0)
     memory_write("float", base + 0x1C, 0)
     memory_write("float", base + 0x20, 1)
+end
+
+local function cancelVelocity(part)
+    if not part then return end
+    local prim = getPrimitive(part)
+    if not prim then return end
+    memory_write("float", prim + 0xF0, 0)
+    memory_write("float", prim + 0xF4, 0)
+    memory_write("float", prim + 0xF8, 0)
+end
+
+local function sortPlayerNames(names)
+    table.sort(names, function(a, b)
+        return a:lower() < b:lower()
+    end)
+    return names
+end
+
+local function updatePlayerList()
+    local newNames = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player then
+            table.insert(newNames, plr.Name)
+        end
+    end
+    playerNames = sortPlayerNames(newNames)
+    if dropdown then
+        dropdown:Refresh(playerNames)
+    end
 end
 
 function teleportToTargetTorso()
@@ -98,6 +112,7 @@ local function performStomp(targetPosition)
     hrp.Position = Vector3.new(targetPosition.X, targetPosition.Y + 2.5, targetPosition.Z)
     if hrpPrim then
         writeUprightRot(hrpPrim)
+        cancelVelocity(hrp)
     end
     keypress(0x45)
     task.wait(0.01)
@@ -126,6 +141,21 @@ function kickPlayer(targetPlayer)
     end)
     return false
 end
+
+local groupMonitor = {}
+groupMonitor.kickOnJoin = false
+groupMonitor.kickOnJoinToggle = nil
+
+groupMonitor.GROUPS = {
+    {id = 8068202, name = "da hood stars", url = "https://groups.roblox.com/v1/groups/8068202/users?limit=100&sortOrder=Asc"},
+    {id = 10604500, name = "da hood verified", url = "https://groups.roblox.com/v1/groups/10604500/users?limit=100&sortOrder=Asc"},
+    {id = 17215700, name = "stars staff", url = "https://groups.roblox.com/v1/groups/17215700/users?limit=100&sortOrder=Asc"}
+}
+groupMonitor.trackedUsers = {}
+groupMonitor.activeUsers = {}
+groupMonitor.notifiedThisSession = {}
+groupMonitor.loadingComplete = false
+groupMonitor.groupsLoading = 0
 
 function groupMonitor:fetchGroupMembers(group, cursor)
     local url = group.url
@@ -259,26 +289,6 @@ function groupMonitor:initialize()
     end
 end
 
-local function sortPlayerNames(names)
-    table.sort(names, function(a, b)
-        return a:lower() < b:lower()
-    end)
-    return names
-end
-
-local function updatePlayerList()
-    local newNames = {}
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= player then
-            table.insert(newNames, plr.Name)
-        end
-    end
-    playerNames = sortPlayerNames(newNames)
-    if dropdown then
-        dropdown:Refresh(playerNames)
-    end
-end
-
 updatePlayerList()
 
 Players.PlayerAdded:Connect(function(plr)
@@ -362,8 +372,10 @@ end
 function returnToStartPosition()
     local character = player.Character
     if character and character:FindFirstChild("HumanoidRootPart") and orbitStartPosition then
+        local hrp = character.HumanoidRootPart
         pcall(function()
-            character.HumanoidRootPart.Position = orbitStartPosition
+            hrp.Position = orbitStartPosition
+            cancelVelocity(hrp)
         end)
         notify("returned to start", "orbit", 5)
     end
@@ -372,8 +384,10 @@ end
 function returnToVoidStartPosition()
     local character = player.Character
     if character and character:FindFirstChild("HumanoidRootPart") and voidStartPosition then
+        local hrp = character.HumanoidRootPart
         pcall(function()
-            character.HumanoidRootPart.Position = voidStartPosition
+            hrp.Position = voidStartPosition
+            cancelVelocity(hrp)
         end)
         voidStartPosition = nil
         notify("returned from void", "void", 5)
